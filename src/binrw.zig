@@ -1,5 +1,4 @@
 const std = @import("std");
-const smeta = std.meta;
 const Type = std.builtin.Type;
 const Allocator = std.mem.Allocator;
 const comptimePrint = std.fmt.comptimePrint;
@@ -12,7 +11,6 @@ const SliceReader = @import("io.zig").reader.SliceReader;
 pub const BinRWError = error {
     ErrorMagicBytes,
     UnknownEnumValue,
-    SizeOutOfBoundary,
 };
 
 pub fn BinRW(comptime T: type) type {
@@ -34,25 +32,6 @@ pub fn BinRW(comptime T: type) type {
             return read_impl.read();
         }
     };
-}
-
-fn needAllocator(comptime META: anytype) bool {
-    const info = @typeInfo(META.BinType);
-    switch (info) {
-        .Struct, .Union => {
-            const COMPILED_BINTYPE_META = META.COMPILED_BINTYPE_META;
-            inline for (smeta.fields(META.BinType)) |field| {
-                const FIELD_META = @field(COMPILED_BINTYPE_META, field.name);
-                if (needAllocator(FIELD_META)) {
-                    return true;
-                }
-            }
-            return false;
-        },
-        .Pointer => |p| return isPtrNeedAllocator(META, p),
-        .Enum, .Int, .Float => return false,
-        else => unreachable,
-    }
 }
 
 fn isPtrNeedAllocator(comptime META: anytype, comptime p: Type.Pointer) bool {
@@ -106,7 +85,7 @@ return struct {
                 .Struct => |s| try self.readStruct(s),
                 .Union => |u| try self.readUnion(u),
                 .Pointer => |p| try self.readPointer(p),
-                .Int, .Float => try self.readNumeric(),
+                .Int, .Float => try self.readNumericWithEndian(META.BinType, READ_ATTRS.endian),
                 else => unreachable,
             };
 
@@ -143,9 +122,7 @@ return struct {
             const e_info = @typeInfo(u.tag_type.?);
             const ETagT = e_info.Enum.tag_type;
 
-            var bytes: [@sizeOf(ETagT)]u8 = undefined;
-            try self.reader.readNoEof(&bytes);
-            const val: ETagT = numericFromBytesWithEndian(ETagT, READ_ATTRS.endian.?, bytes);
+            const val = try self.readNumericWithEndian(ETagT, READ_ATTRS.endian);
 
             inline for (e_info.Enum.fields) |ef| {
                 if (val == ef.value) {
@@ -203,7 +180,7 @@ return struct {
                 const CHILD_META = META.COMPILED_BINTYPE_META;
                 const remaining_bytes = self.reader.context.bytes.len;
                 if (len > remaining_bytes) {
-                    return BinRWError.SizeOutOfBoundary;
+                    return error.EndOfStream;
                 }
                 const bytes = self.reader.context.bytes[0..(len * @sizeOf(CHILD_META.BinType))];
                 const slice = std.mem.bytesAsSlice(CHILD_META.BinType, bytes);
@@ -211,57 +188,14 @@ return struct {
                 return @alignCast(@ptrCast(slice));
         }
 
-        fn readNumeric(self: *Self) ReadError!META.BinType {
-            const READ_ATTRS: attr.Attrs = META.READ_ATTRS;
-
-            var bytes: [@sizeOf(META.BinType)]u8 = undefined;
-            try self.reader.readNoEof(&bytes);
-            return numericFromBytesWithEndian(META.BinType, READ_ATTRS.endian.?, bytes);
+        inline fn readNumericWithEndian(self: *Self, comptime T: type, comptime endian: ?attr.Endian) ReadError!T {
+            return switch (comptime endian.?) {
+                .Big => try self.reader.readIntBig(T),
+                .Little => try self.reader.readIntLittle(T),
+                .Native => try self.reader.readIntNative(T),
+            };
         }
     };
     }
 };
-}
-
-fn UBits(comptime Numeric: type) type {
-    return switch (@sizeOf(Numeric)) {
-        1 => u8,
-        2 => u16,
-        4 => u32,
-        8 => u64,
-        16 => u128,
-        else => @compileError(comptimePrint(
-            "Unsupport numeric type {s}", 
-            .{@typeName(Numeric)}
-        )),
-    };
-}
-
-fn numericFromBytesWithEndian(
-    comptime Numeric: type,
-    comptime endian: attr.Endian,
-    bytes: [@sizeOf(Numeric)]u8,
-) Numeric {
-    const NumericBits = UBits(Numeric);
-    var bits: NumericBits = 0;
-    switch (endian) {
-        .Big => {
-            inline for (0..bytes.len) |i| {
-                const v: NumericBits = @intCast(bytes[i]);
-                bits |= v << (bytes.len - 1 - i) * 8;
-            }
-        },
-        .Little => {
-            inline for (bytes, 0..) |b, i| {
-                const v: NumericBits = @intCast(b);
-                bits |= v << (i * 8);
-            }
-        },
-        .Native => {
-            const nptr: *const Numeric = @alignCast(@ptrCast(bytes[0..].ptr));
-            return nptr.*;
-        }
-    }
-
-    return @bitCast(bits);
 }
