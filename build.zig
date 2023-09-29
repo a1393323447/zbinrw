@@ -15,6 +15,11 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    _ = b.addModule("zbinrw", .{
+        .source_file = .{ .path = "zbinrw.zig" },
+        .dependencies = &[_]std.Build.ModuleDependency{},
+    });
+
     // Creates a step for unit testing. This only builds the test executable
     // but does not run it.
     const zbinrw_tests = b.addTest(.{
